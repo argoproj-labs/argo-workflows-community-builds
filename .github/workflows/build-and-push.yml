@@ -49,8 +49,8 @@ jobs:
             versions='["${{ github.event.inputs.version }}"]'
             latest_version="${{ github.event.inputs.version }}"
           else
-            # Get latest 3 stable releases (non-RC versions)
-            releases=$(curl -s https://api.github.com/repos/argoproj/argo-workflows/releases | jq -r '.[] | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name' | head -3)
+            # Get latest 2 stable releases (non-RC versions)
+            releases=$(curl -s https://api.github.com/repos/argoproj/argo-workflows/releases | jq -r '.[] | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name' | head -2)
             versions=$(echo "$releases" | jq -R . | jq -s . -c)
             latest_version=$(echo "$releases" | head -1)
           fi
