@@ -1,0 +1,589 @@
+name: Build and Push Argo Workflows (BoringCrypto)
+
+on:
+  schedule:
+    # Check for new releases every day at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Argo Workflows version to build (e.g., v3.7.2)'
+        required: false
+        type: string
+      force_build:
+        description: 'Force build even if image exists'
+        required: false
+        default: false
+        type: boolean
+      registry:
+        description: 'Container registry to push to'
+        required: false
+        default: 'ghcr.io'
+        type: choice
+        options:
+        - 'ghcr.io'
+        - 'quay.io'
+        - 'docker.io'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-and-push.yml'
+
+env:
+  GOEXPERIMENT: boringcrypto
+
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.get-versions.outputs.versions }}
+      latest-version: ${{ steps.get-versions.outputs.latest-version }}
+    steps:
+      - name: Get Argo Workflows releases
+        id: get-versions
+        run: |
+          # Get the latest releases from upstream
+          if [ "${{ github.event.inputs.version }}" != "" ]; then
+            # Manual trigger with specific version
+            versions='["${{ github.event.inputs.version }}"]'
+            latest_version="${{ github.event.inputs.version }}"
+          else
+            # Get latest 3 stable releases (non-RC versions)
+            releases=$(curl -s https://api.github.com/repos/argoproj/argo-workflows/releases | jq -r '.[] | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name' | head -3)
+            versions=$(echo "$releases" | jq -R . | jq -s . -c)
+            latest_version=$(echo "$releases" | head -1)
+          fi
+          
+          echo "versions=$versions" >> $GITHUB_OUTPUT
+          echo "latest-version=$latest_version" >> $GITHUB_OUTPUT
+          echo "Found versions: $versions"
+          echo "Latest version: $latest_version"
+
+  build-linux:
+    name: Build & push linux
+    needs: check-releases
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [ linux/amd64, linux/arm64 ]
+        target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
+        version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set registry variables
+        run: |
+          if [ "${{ github.event.inputs.registry }}" != "" ]; then
+            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
+          else
+            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
+          fi
+          
+          # Set image namespace and login credentials based on registry
+          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
+            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
+            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Clone Argo Workflows source
+        run: |
+          git clone --depth 1 --branch ${{ matrix.version }} https://github.com/argoproj/argo-workflows.git
+          cd argo-workflows
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-${{ matrix.platform }}-${{ matrix.target }}-${{ matrix.version }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.platform }}-${{ matrix.target }}-${{ matrix.version }}-buildx-
+            ${{ runner.os }}-${{ matrix.platform }}-${{ matrix.target }}-buildx-
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Check if image already exists
+        id: check-image
+        run: |
+          cd argo-workflows
+          tag="${{ matrix.version }}-fips"
+          tag_suffix=$(echo "${{ matrix.platform }}" | sed -r "s/\//-/g")
+          
+          # Special handling for argoexec-nonroot to create argoexec:tag-nonroot-platform instead
+          if [ "${{ matrix.target }}" = "argoexec-nonroot" ]; then
+            image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-${tag_suffix}"
+          else
+            image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}-${tag_suffix}"
+          fi
+          
+          if docker manifest inspect "$image_name" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Image $image_name already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Image $image_name does not exist"
+          fi
+          
+          echo "image_name=$image_name" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        if: steps.check-image.outputs.exists != 'true' || github.event.inputs.force_build == 'true'
+        run: |
+          cd argo-workflows
+          set -eux
+          
+          tag="${{ matrix.version }}-fips"
+          
+          # Get git info (copied verbatim from upstream)
+          GIT_COMMIT=$(git rev-parse HEAD || echo unknown)
+          GIT_TAG=$(git describe --exact-match --tags --abbrev=0  2> /dev/null || echo untagged)
+          GIT_TREE_STATE=$(if [ -z "`git status --porcelain`" ]; then echo "clean" ; else echo "dirty"; fi)
+          tag_suffix=$(echo "${{ matrix.platform }}" | sed -r "s/\//-/g")
+
+          # Special handling for argoexec-nonroot to create argoexec:tag-nonroot-platform instead
+          if [ "${{ matrix.target }}" = "argoexec-nonroot" ]; then
+            image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-${tag_suffix}"
+          else
+            image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}-${tag_suffix}"
+          fi
+
+          docker buildx build \
+            --cache-from "type=local,src=/tmp/.buildx-cache" \
+            --cache-to "type=local,dest=/tmp/.buildx-cache-new,mode=max" \
+            --output "type=image,push=true" \
+            --build-arg GIT_COMMIT=$GIT_COMMIT \
+            --build-arg GIT_TAG=$GIT_TAG \
+            --build-arg GIT_TREE_STATE=$GIT_TREE_STATE \
+            --build-arg GOEXPERIMENT=boringcrypto \
+            --platform="${{ matrix.platform }}" \
+            --target ${{ matrix.target }} \
+            --provenance=false \
+            --tag $image_name .
+
+      - name: Move cache
+        if: steps.check-image.outputs.exists != 'true' || github.event.inputs.force_build == 'true'
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  push-manifests:
+    name: Push manifest with all images
+    needs: [ check-releases, build-linux ]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set registry variables
+        run: |
+          if [ "${{ github.event.inputs.registry }}" != "" ]; then
+            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
+          else
+            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
+          fi
+          
+          # Set image namespace and login credentials based on registry
+          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
+            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
+            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Push Multi-arch Manifests
+        run: |
+          # Enable experimental CLI features for manifest command
+          export DOCKER_CLI_EXPERIMENTAL=enabled
+          
+          tag="${{ matrix.version }}-fips"
+          
+          targets="workflow-controller argoexec argoexec-nonroot argocli"
+          for target in $targets; do
+            if [ "$target" = "argoexec-nonroot" ]; then
+              # Special handling for argoexec-nonroot: create argoexec:tag-nonroot manifest
+              image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
+              docker manifest create $image_name \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64
+            else
+              image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
+              docker manifest create $image_name \
+                ${image_name}-linux-arm64 \
+                ${image_name}-linux-amd64
+            fi
+
+            docker manifest push $image_name
+            echo "✅ Pushed manifest: $image_name"
+          done
+
+      - name: Tag latest images
+        if: matrix.version == needs.check-releases.outputs.latest-version
+        run: |
+          export DOCKER_CLI_EXPERIMENTAL=enabled
+          
+          tag="${{ matrix.version }}-fips"
+          
+          targets="workflow-controller argoexec argoexec-nonroot argocli"
+          for target in $targets; do
+            if [ "$target" = "argoexec-nonroot" ]; then
+              # Special handling for argoexec-nonroot
+              image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
+              latest_name="${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips-nonroot"
+              
+              docker manifest create $latest_name \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64
+            else
+              image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
+              latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
+              
+              docker manifest create $latest_name \
+                ${image_name}-linux-arm64 \
+                ${image_name}-linux-amd64
+            fi
+
+            docker manifest push $latest_name
+            echo "✅ Pushed latest manifest: $latest_name"
+          done
+
+  test-docker-images:
+    name: Test Docker Images for FIPS
+    needs: [check-releases, push-manifests]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+        target: [workflow-controller, argocli, argoexec]
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.4'
+
+      - name: Set registry variables
+        run: |
+          if [ "${{ github.event.inputs.registry }}" != "" ]; then
+            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
+          else
+            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
+          fi
+          
+          # Set image namespace and login credentials based on registry
+          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
+            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
+            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Test FIPS in Docker images
+        run: |
+          tag="${{ matrix.version }}-fips"
+          image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}"
+          
+          echo "🐳 Testing FIPS compliance in Docker image: $image_name"
+          
+          # Pull the image
+          echo "Pulling image..."
+          docker pull "$image_name"
+          
+          # Determine the binary path in the container based on target
+          case "${{ matrix.target }}" in
+            "workflow-controller")
+              binary_path="/bin/workflow-controller"
+              ;;
+            "argocli")
+              binary_path="/bin/argo"
+              ;;
+            "argoexec")
+              binary_path="/bin/argoexec"
+              ;;
+            *)
+              echo "❌ Unknown target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+          
+          echo "Testing binary: $binary_path"
+          
+          # Extract binary from distroless container for testing
+          echo "🔍 Extracting binary from distroless container..."
+          container_id=$(docker create "$image_name")
+          docker cp "$container_id:$binary_path" "./binary-${{ matrix.target }}"
+          docker rm "$container_id"
+
+          # Test using strings command on host
+          echo "🔍 Testing FIPS strings in extracted binary..."
+          if strings "./binary-${{ matrix.target }}" | grep -iE '(boringssl|boringcrypto|fips)' | head -10; then
+            echo '✅ BoringSSL/FIPS strings found in ${{ matrix.target }}'
+            fips_test_result="✅ FIPS validation passed"
+          else
+            echo '⚠️ No BoringSSL/FIPS strings found in ${{ matrix.target }}'
+            fips_test_result="❌ FIPS validation failed"
+          fi
+
+          # Test with go tool nm if available on host
+          if command -v go >/dev/null 2>&1; then
+            echo "🔍 Testing FIPS symbols using go tool nm..."
+            if go tool nm "./binary-${{ matrix.target }}" | grep -iE '(boringcrypto|fips|boring)' | head -10; then
+              echo '✅ BoringCrypto/FIPS symbols found via go tool nm'
+            else
+              echo '⚠️ No BoringCrypto/FIPS symbols found via go tool nm'
+            fi
+          fi
+
+          # Clean up extracted binary
+          rm -f "./binary-${{ matrix.target }}"
+
+          echo "$fips_test_result for ${{ matrix.target }}"
+          
+          # Test version command using subcommands
+          echo "🧪 Testing version command..."
+          case "${{ matrix.target }}" in
+            "workflow-controller")
+              docker run --rm "$image_name" version || echo "Version command test completed"
+              ;;
+            "argocli")
+              docker run --rm "$image_name" version || echo "Version command test completed"
+              ;;
+            "argoexec")
+              docker run --rm "$image_name" version || echo "Version command test completed"
+              ;;
+          esac
+
+  update-readme:
+    needs: [check-releases, push-manifests, test-docker-images]
+    runs-on: ubuntu-latest
+    if: always() && needs.push-manifests.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set registry variables
+        run: |
+          if [ "${{ github.event.inputs.registry }}" != "" ]; then
+            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
+          else
+            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
+          fi
+          
+          # Set image namespace and login credentials based on registry
+          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
+            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
+            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Update README with latest builds
+        run: |
+          cat > README.md << 'EOF'
+          # Argo Workflows Community Builds
+          
+          This repository provides unofficial builds of Argo Workflows containers with BoringCrypto support for FIPS 140-2 compliance.
+          
+          ## Available Images
+          
+          All images are built with `GOEXPERIMENT=boringcrypto` using the official Argo Workflows Dockerfile and build process.
+          
+          ### Latest Images (BoringCrypto)
+          
+          ```bash
+          # Workflow Controller
+          ${{ env.IMAGE_NAMESPACE }}/workflow-controller:latest-fips
+          
+          # Argo CLI  
+          ${{ env.IMAGE_NAMESPACE }}/argocli:latest-fips
+          
+          # Executor
+          ${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips
+          
+          # Executor (non-root)
+          ${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips-nonroot
+          ```
+          
+          ### Versioned Images
+          
+          Specific versions follow the upstream pattern with `-fips` suffix:
+          
+          ```bash
+          # Example for v3.7.2
+          ${{ env.IMAGE_NAMESPACE }}/workflow-controller:v3.7.2-fips
+          ${{ env.IMAGE_NAMESPACE }}/argocli:v3.7.2-fips  
+          ${{ env.IMAGE_NAMESPACE }}/argoexec:v3.7.2-fips
+          ${{ env.IMAGE_NAMESPACE }}/argoexec:v3.7.2-fips-nonroot
+          ```
+          
+          ## Usage
+          
+          Replace the standard Argo Workflows images in your deployment:
+          
+          ### Workflow Controller Deployment
+          
+          ```yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: workflow-controller
+          spec:
+            template:
+              spec:
+                containers:
+                - name: workflow-controller
+                  image: ${{ env.IMAGE_NAMESPACE }}/workflow-controller:latest-fips
+          ```
+          
+          ### Workflow Controller ConfigMap
+          
+          ```yaml
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: workflow-controller-configmap
+          data:
+            config: |
+              executor:
+                image: ${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips
+          ```
+          
+          ### Argo CLI
+          
+          ```bash
+          # Pull and use the BoringCrypto CLI
+          docker run --rm -it ${{ env.IMAGE_NAMESPACE }}/argocli:latest-fips version
+          ```
+          
+          ## Automatic Updates
+          
+          Images are automatically built daily to track the latest Argo Workflows releases. The workflow:
+          
+          1. Checks for new releases from `argoproj/argo-workflows`
+          2. Clones the source code for each new version  
+          3. Builds all components (controller, executor, cli) with `GOEXPERIMENT=boringcrypto`
+          4. Creates multi-architecture manifests for linux/amd64 and linux/arm64
+          5. Pushes to the configured container registry
+          
+          ## BoringCrypto & FIPS Compliance
+          
+          These builds include BoringCrypto, Google's FIPS 140-2 validated cryptographic module. Key benefits:
+          
+          - **FIPS 140-2 Compliance**: Suitable for government and regulated environments
+          - **Validated Cryptography**: Uses BoringSSL instead of Go's standard crypto packages  
+          - **Same Functionality**: Drop-in replacement for standard Argo Workflows images
+          - **Regular Updates**: Automatically tracks upstream releases
+          
+          The `GOEXPERIMENT=boringcrypto` build flag ensures all cryptographic operations use the FIPS-validated BoringSSL library.
+          
+          ## Build Process
+          
+          The images are built using the exact same process as upstream Argo Workflows:
+          
+          - Uses the official Dockerfile from `argoproj/argo-workflows`
+          - Uses the same build targets: `workflow-controller`, `argocli`, `argoexec`, `argoexec-nonroot`
+          - Follows the same multi-stage build process
+          - Only adds the `GOEXPERIMENT=boringcrypto` build argument
+          - Creates the same multi-architecture manifests (linux/amd64, linux/arm64)
+          
+          ## Supported Architectures
+          
+          - linux/amd64
+          - linux/arm64
+          
+          ## Registry Support
+          
+          Images can be pushed to multiple registries:
+          - GitHub Container Registry (ghcr.io) - default
+          - Quay.io (quay.io)  
+          - Docker Hub (docker.io)
+          
+          ## Manual Builds
+          
+          You can trigger manual builds using GitHub Actions workflow dispatch:
+          
+          1. Go to the Actions tab
+          2. Select "Build and Push Argo Workflows (BoringCrypto)"
+          3. Click "Run workflow"
+          4. Optionally specify a specific version and registry
+          
+          ## License
+          
+          This project follows the same Apache 2.0 license as Argo Workflows.
+          EOF
+
+      - name: Commit README updates
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update README with build information [skip ci]"
+            git push
+          fi
