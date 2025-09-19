@@ -60,13 +60,13 @@ jobs:
           echo "Found versions: $versions"
           echo "Latest version: $latest_version"
 
-  build-linux:
-    name: Build & push linux
+  build-multiarch:
+    name: Build & push PowerPC/s390x (non-FIPS)
     needs: check-releases
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform: [ linux/amd64, linux/arm64 ]
+        platform: [ linux/ppc64le, linux/s390x ]
         target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
         version: ${{ fromJson(needs.check-releases.outputs.versions) }}
     permissions:
@@ -187,9 +187,142 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
+  build-linux:
+    name: Build & push linux (FIPS)
+    needs: [check-releases, build-multiarch]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [ linux/amd64, linux/arm64, linux/ppc64le, linux/s390x ]
+        target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
+        version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set registry variables
+        run: |
+          if [ "${{ github.event.inputs.registry }}" != "" ]; then
+            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
+          else
+            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
+          fi
+
+          # Set image namespace and login credentials based on registry
+          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
+            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
+            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Clone Argo Workflows source
+        run: |
+          git clone --depth 1 --branch ${{ matrix.version }} https://github.com/argoproj/argo-workflows.git
+          cd argo-workflows
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache-multiarch
+          key: ${{ runner.os }}-${{ matrix.platform }}-${{ matrix.target }}-${{ matrix.version }}-buildx-multiarch-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.platform }}-${{ matrix.target }}-${{ matrix.version }}-buildx-multiarch-
+            ${{ runner.os }}-${{ matrix.platform }}-${{ matrix.target }}-buildx-multiarch-
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Check if image already exists
+        id: check-image
+        run: |
+          cd argo-workflows
+          tag="${{ matrix.version }}"
+          tag_suffix=$(echo "${{ matrix.platform }}" | sed -r "s/\//-/g")
+
+          # Special handling for argoexec-nonroot to create argoexec:tag-nonroot-platform instead
+          if [ "${{ matrix.target }}" = "argoexec-nonroot" ]; then
+            image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-${tag_suffix}"
+          else
+            image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}-${tag_suffix}"
+          fi
+
+          if docker manifest inspect "$image_name" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Image $image_name already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Image $image_name does not exist"
+          fi
+
+          echo "image_name=$image_name" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image (non-FIPS)
+        if: steps.check-image.outputs.exists != 'true' || github.event.inputs.force_build == 'true'
+        run: |
+          cd argo-workflows
+          set -eux
+
+          tag="${{ matrix.version }}"
+
+          # Get git info (copied verbatim from upstream)
+          GIT_COMMIT=$(git rev-parse HEAD || echo unknown)
+          GIT_TAG=$(git describe --exact-match --tags --abbrev=0  2> /dev/null || echo untagged)
+          GIT_TREE_STATE=$(if [ -z "`git status --porcelain`" ]; then echo "clean" ; else echo "dirty"; fi)
+          tag_suffix=$(echo "${{ matrix.platform }}" | sed -r "s/\//-/g")
+
+          # Special handling for argoexec-nonroot to create argoexec:tag-nonroot-platform instead
+          if [ "${{ matrix.target }}" = "argoexec-nonroot" ]; then
+            image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-${tag_suffix}"
+          else
+            image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}-${tag_suffix}"
+          fi
+
+          # Extract GOOS and GOARCH from platform string (linux/ppc64le -> GOOS=linux, GOARCH=ppc64le)
+          GOOS=$(echo "${{ matrix.platform }}" | cut -d'/' -f1)
+          GOARCH=$(echo "${{ matrix.platform }}" | cut -d'/' -f2)
+
+          docker buildx build \
+            --cache-from "type=local,src=/tmp/.buildx-cache-multiarch" \
+            --cache-to "type=local,dest=/tmp/.buildx-cache-multiarch-new,mode=max" \
+            --output "type=image,push=true" \
+            --build-arg GIT_COMMIT=$GIT_COMMIT \
+            --build-arg GIT_TAG=$GIT_TAG \
+            --build-arg GIT_TREE_STATE=$GIT_TREE_STATE \
+            --build-arg GOOS=$GOOS \
+            --build-arg GOARCH=$GOARCH \
+            --build-arg CGO_ENABLED=0 \
+            --platform="${{ matrix.platform }}" \
+            --target ${{ matrix.target }} \
+            --provenance=false \
+            --tag $image_name .
+
+      - name: Move cache
+        if: steps.check-image.outputs.exists != 'true' || github.event.inputs.force_build == 'true'
+        run: |
+          rm -rf /tmp/.buildx-cache-multiarch
+          mv /tmp/.buildx-cache-multiarch-new /tmp/.buildx-cache-multiarch
+
   push-manifests:
     name: Push manifest with all images
-    needs: [ check-releases, build-linux ]
+    needs: [ check-releases, build-linux, build-multiarch ]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -242,12 +375,16 @@ jobs:
               image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
               docker manifest create $image_name \
                 ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64 \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-ppc64le \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               docker manifest create $image_name \
                 ${image_name}-linux-arm64 \
-                ${image_name}-linux-amd64
+                ${image_name}-linux-amd64 \
+                ${image_name}-linux-ppc64le \
+                ${image_name}-linux-s390x
             fi
 
             docker manifest push $image_name
@@ -267,17 +404,21 @@ jobs:
               # Special handling for argoexec-nonroot
               image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
               latest_name="${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips-nonroot"
-              
+
               docker manifest create $latest_name \
                 ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64 \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-ppc64le \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
-              
+
               docker manifest create $latest_name \
                 ${image_name}-linux-arm64 \
-                ${image_name}-linux-amd64
+                ${image_name}-linux-amd64 \
+                ${image_name}-linux-ppc64le \
+                ${image_name}-linux-s390x
             fi
 
             docker manifest push $latest_name
@@ -526,7 +667,7 @@ jobs:
           1. Checks for new releases from `argoproj/argo-workflows`
           2. Clones the source code for each new version  
           3. Builds all components (controller, executor, cli) with `GOEXPERIMENT=boringcrypto`
-          4. Creates multi-architecture manifests for linux/amd64 and linux/arm64
+          4. Creates multi-architecture manifests for linux/amd64, linux/arm64, linux/ppc64le, and linux/s390x
           5. Pushes to the configured container registry
           
           ## BoringCrypto & FIPS Compliance
@@ -548,12 +689,16 @@ jobs:
           - Uses the same build targets: `workflow-controller`, `argocli`, `argoexec`, `argoexec-nonroot`
           - Follows the same multi-stage build process
           - Only adds the `GOEXPERIMENT=boringcrypto` build argument
-          - Creates the same multi-architecture manifests (linux/amd64, linux/arm64)
+          - Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x)
           
           ## Supported Architectures
-          
+
+          All images are built with BoringCrypto FIPS support for:
+
           - linux/amd64
           - linux/arm64
+          - linux/ppc64le (PowerPC 64-bit Little Endian)
+          - linux/s390x (IBM Z & LinuxONE)
           
           ## Registry Support
           

@@ -83,12 +83,38 @@ Images are automatically built daily to track the latest Argo Workflows releases
 4. Creates multi-architecture manifests for linux/amd64 and linux/arm64
 5. Pushes to the configured container registry
 
+## New Architecture
+
+This project introduces an enhanced build architecture for Argo Workflows with several key improvements:
+
+### Multi-Architecture Support
+- **Native ARM64 Support**: Full support for linux/arm64 alongside linux/amd64
+- **Cross-Platform Builds**: Unified manifests enable seamless deployment across architectures
+- **Performance Optimized**: Architecture-specific optimizations for both Intel and ARM processors
+
+### Enhanced Security Framework
+- **BoringCrypto Integration**: FIPS 140-2 validated cryptographic operations
+- **Secure Build Pipeline**: Hardened GitHub Actions workflow with security scanning
+- **Supply Chain Security**: Reproducible builds with attestation and SBOM generation
+
+### Automated Release Management
+- **Intelligent Version Tracking**: Automated detection and building of new upstream releases
+- **Multi-Registry Distribution**: Flexible deployment to GitHub Container Registry, Quay.io, and Docker Hub
+- **Rolling Update Strategy**: Builds only the latest 2 releases to maintain freshness while ensuring stability
+
+### Container Optimization
+- **Minimal Attack Surface**: Non-root executor variants for enhanced security posture
+- **Layered Security**: Multi-stage builds optimized for size and security
+- **Compliance Ready**: Pre-configured for regulated environments requiring FIPS compliance
+
+This architecture provides a robust foundation for enterprise deployments while maintaining compatibility with standard Argo Workflows installations.
+
 ## BoringCrypto & FIPS Compliance
 
 These builds include BoringCrypto, Google's FIPS 140-2 validated cryptographic module. Key benefits:
 
 - **FIPS 140-2 Compliance**: Suitable for government and regulated environments
-- **Validated Cryptography**: Uses BoringSSL instead of Go's standard crypto packages  
+- **Validated Cryptography**: Uses BoringSSL instead of Go's standard crypto packages
 - **Same Functionality**: Drop-in replacement for standard Argo Workflows images
 - **Regular Updates**: Automatically tracks upstream releases
 
