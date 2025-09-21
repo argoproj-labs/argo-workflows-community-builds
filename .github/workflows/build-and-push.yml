@@ -266,7 +266,7 @@ jobs:
         id: check-image
         run: |
           cd argo-workflows
-          tag="${{ matrix.version }}"
+          tag="${{ matrix.version }}-fips"
           tag_suffix=$(echo "${{ matrix.platform }}" | sed -r "s/\//-/g")
 
           # Special handling for argoexec-nonroot to create argoexec:tag-nonroot-platform instead
@@ -286,13 +286,13 @@ jobs:
 
           echo "image_name=$image_name" >> $GITHUB_OUTPUT
 
-      - name: Build and push Docker image (non-FIPS)
+      - name: Build and push Docker image (FIPS)
         if: steps.check-image.outputs.exists != 'true' || github.event.inputs.force_build == 'true'
         run: |
           cd argo-workflows
           set -eux
 
-          tag="${{ matrix.version }}"
+          tag="${{ matrix.version }}-fips"
 
           # Get git info (copied verbatim from upstream)
           GIT_COMMIT=$(git rev-parse HEAD || echo unknown)
@@ -326,9 +326,9 @@ jobs:
           rm -rf /tmp/.buildx-cache-fips
           mv /tmp/.buildx-cache-fips-new /tmp/.buildx-cache-fips
 
-  push-manifests:
-    name: Push manifest with all images
-    needs: [ check-releases, build-fips, build-multiarch ]
+  push-multiarch-manifests:
+    name: Push multi-arch manifests (regular builds)
+    needs: [ check-releases, build-multiarch ]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -367,13 +367,122 @@ jobs:
           username: ${{ env.DOCKER_USERNAME }}
           password: ${{ env.DOCKER_PASSWORD }}
 
-      - name: Push Multi-arch Manifests
+      - name: Push Multi-arch Manifests (PowerPC/s390x only)
         run: |
           # Enable experimental CLI features for manifest command
           export DOCKER_CLI_EXPERIMENTAL=enabled
-          
+
+          tag="${{ matrix.version }}"
+
+          targets="workflow-controller argoexec argoexec-nonroot argocli"
+          for target in $targets; do
+            if [ "$target" = "argoexec-nonroot" ]; then
+              # Special handling for argoexec-nonroot: create argoexec:tag-nonroot manifest
+              image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
+              docker manifest create $image_name \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-ppc64le \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
+            else
+              image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
+              if [ "$target" = "argocli" ]; then
+                # argocli excludes s390x - only ppc64le for multiarch
+                docker manifest create $image_name \
+                  ${image_name}-linux-ppc64le
+              else
+                docker manifest create $image_name \
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
+              fi
+            fi
+
+            docker manifest push $image_name
+            echo "✅ Pushed manifest: $image_name"
+          done
+
+      - name: Tag latest images (PowerPC/s390x only)
+        if: matrix.version == needs.check-releases.outputs.latest-version
+        run: |
+          export DOCKER_CLI_EXPERIMENTAL=enabled
+
+          tag="${{ matrix.version }}"
+
+          targets="workflow-controller argoexec argoexec-nonroot argocli"
+          for target in $targets; do
+            if [ "$target" = "argoexec-nonroot" ]; then
+              # Special handling for argoexec-nonroot
+              image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
+              latest_name="${{ env.IMAGE_NAMESPACE }}/argoexec:latest-nonroot"
+
+              docker manifest create $latest_name \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-ppc64le \
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
+            else
+              image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
+              latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest"
+
+              if [ "$target" = "argocli" ]; then
+                # argocli excludes s390x - only ppc64le for multiarch
+                docker manifest create $latest_name \
+                  ${image_name}-linux-ppc64le
+              else
+                docker manifest create $latest_name \
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
+              fi
+            fi
+
+            docker manifest push $latest_name
+            echo "✅ Pushed latest manifest: $latest_name"
+          done
+
+  push-fips-manifests:
+    name: Push FIPS manifests
+    needs: [ check-releases, build-fips ]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set registry variables
+        run: |
+          if [ "${{ github.event.inputs.registry }}" != "" ]; then
+            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
+          else
+            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
+          fi
+
+          # Set image namespace and login credentials based on registry
+          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
+            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
+            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
+            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
+            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Push FIPS Multi-arch Manifests
+        run: |
+          # Enable experimental CLI features for manifest command
+          export DOCKER_CLI_EXPERIMENTAL=enabled
+
           tag="${{ matrix.version }}-fips"
-          
+
           targets="workflow-controller argoexec argoexec-nonroot argocli"
           for target in $targets; do
             if [ "$target" = "argoexec-nonroot" ]; then
@@ -387,7 +496,7 @@ jobs:
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               if [ "$target" = "argocli" ]; then
-                # argocli excludes s390x
+                # argocli excludes s390x (no FIPS build for s390x argocli)
                 docker manifest create $image_name \
                   ${image_name}-linux-arm64 \
                   ${image_name}-linux-amd64 \
@@ -402,16 +511,16 @@ jobs:
             fi
 
             docker manifest push $image_name
-            echo "✅ Pushed manifest: $image_name"
+            echo "✅ Pushed FIPS manifest: $image_name"
           done
 
-      - name: Tag latest images
+      - name: Tag latest FIPS images
         if: matrix.version == needs.check-releases.outputs.latest-version
         run: |
           export DOCKER_CLI_EXPERIMENTAL=enabled
-          
+
           tag="${{ matrix.version }}-fips"
-          
+
           targets="workflow-controller argoexec argoexec-nonroot argocli"
           for target in $targets; do
             if [ "$target" = "argoexec-nonroot" ]; then
@@ -429,7 +538,7 @@ jobs:
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
 
               if [ "$target" = "argocli" ]; then
-                # argocli excludes s390x
+                # argocli excludes s390x (no FIPS build for s390x argocli)
                 docker manifest create $latest_name \
                   ${image_name}-linux-arm64 \
                   ${image_name}-linux-amd64 \
@@ -444,12 +553,12 @@ jobs:
             fi
 
             docker manifest push $latest_name
-            echo "✅ Pushed latest manifest: $latest_name"
+            echo "✅ Pushed latest FIPS manifest: $latest_name"
           done
 
   test-docker-images:
     name: Test Docker Images for FIPS
-    needs: [check-releases, push-manifests]
+    needs: [check-releases, push-fips-manifests]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -570,9 +679,9 @@ jobs:
           esac
 
   update-readme:
-    needs: [check-releases, push-manifests, test-docker-images]
+    needs: [check-releases, push-fips-manifests, test-docker-images]
     runs-on: ubuntu-latest
-    if: always() && needs.push-manifests.result == 'success'
+    if: always() && needs.push-fips-manifests.result == 'success'
     permissions:
       contents: write
     steps:
