@@ -68,9 +68,6 @@ jobs:
         platform: [ linux/ppc64le, linux/s390x ]
         target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
         version: ${{ fromJson(needs.check-releases.outputs.versions) }}
-        exclude:
-          - platform: linux/s390x
-            target: argocli
     permissions:
       contents: read
       packages: write
@@ -102,6 +99,16 @@ jobs:
         run: |
           git clone --depth 1 --branch ${{ matrix.version }} https://github.com/argoproj/argo-workflows.git
           cd argo-workflows
+
+      - name: Modify Dockerfile for s390x argocli
+        if: matrix.platform == 'linux/s390x' && matrix.target == 'argocli'
+        run: |
+          cd argo-workflows
+          # Find and replace node:<version>-alpine with node:<version>-slim
+          sed -i 's/FROM node:\([0-9]\+\)-alpine/FROM node:\1-slim/' Dockerfile
+          # Find node line number and remove apk in next 3 lines
+          LINE=$(grep -n "FROM node:[0-9]\+-slim" Dockerfile | cut -d: -f1)
+          sed -i "$((LINE+1)),$((LINE+3)){ /RUN apk.*git/d; }" Dockerfile
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -197,9 +204,6 @@ jobs:
         platform: [ linux/amd64, linux/arm64, linux/ppc64le, linux/s390x ]
         target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
         version: ${{ fromJson(needs.check-releases.outputs.versions) }}
-        exclude:
-          - platform: linux/s390x
-            target: argocli
     permissions:
       contents: read
       packages: write
@@ -239,6 +243,16 @@ jobs:
         run: |
           cd argo-workflows
           cp ../Dockerfile.fips Dockerfile
+
+      - name: Modify Dockerfile for s390x argocli
+        if: matrix.platform == 'linux/s390x' && matrix.target == 'argocli'
+        run: |
+          cd argo-workflows
+          # Find and replace node:<version>-alpine with node:<version>-slim
+          sed -i 's/FROM node:\([0-9]\+\)-alpine/FROM node:\1-slim/' Dockerfile
+          # Find node line number and remove apk in next 3 lines
+          LINE=$(grep -n "FROM node:[0-9]\+-slim" Dockerfile | cut -d: -f1)
+          sed -i "$((LINE+1)),$((LINE+3)){ /RUN apk.*git/d; }" Dockerfile
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -385,9 +399,9 @@ jobs:
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               if [ "$target" = "argocli" ]; then
-                # argocli excludes s390x - only ppc64le for multiarch
                 docker manifest create $image_name \
-                  ${image_name}-linux-ppc64le
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
               else
                 docker manifest create $image_name \
                   ${image_name}-linux-ppc64le \
@@ -421,9 +435,9 @@ jobs:
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest"
 
               if [ "$target" = "argocli" ]; then
-                # argocli excludes s390x - only ppc64le for multiarch
                 docker manifest create $latest_name \
-                  ${image_name}-linux-ppc64le
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
               else
                 docker manifest create $latest_name \
                   ${image_name}-linux-ppc64le \
@@ -496,11 +510,11 @@ jobs:
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               if [ "$target" = "argocli" ]; then
-                # argocli excludes s390x (no FIPS build for s390x argocli)
                 docker manifest create $image_name \
                   ${image_name}-linux-arm64 \
                   ${image_name}-linux-amd64 \
-                  ${image_name}-linux-ppc64le
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
               else
                 docker manifest create $image_name \
                   ${image_name}-linux-arm64 \
@@ -538,11 +552,11 @@ jobs:
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
 
               if [ "$target" = "argocli" ]; then
-                # argocli excludes s390x (no FIPS build for s390x argocli)
                 docker manifest create $latest_name \
                   ${image_name}-linux-arm64 \
                   ${image_name}-linux-amd64 \
-                  ${image_name}-linux-ppc64le
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
               else
                 docker manifest create $latest_name \
                   ${image_name}-linux-arm64 \
@@ -846,7 +860,7 @@ jobs:
           - Uses the same build targets: `workflow-controller`, `argocli`, `argoexec`, `argoexec-nonroot`
           - Follows the same multi-stage build process
           - Only adds the `GOEXPERIMENT=boringcrypto` build argument
-          - Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x) - argocli excludes s390x
+          - Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x)
           
           ## Supported Architectures
 
@@ -855,7 +869,7 @@ jobs:
           - linux/amd64
           - linux/arm64
           - linux/ppc64le (PowerPC 64-bit Little Endian)
-          - linux/s390x (IBM Z & LinuxONE) - **Note: argocli is not available for s390x**
+          - linux/s390x (IBM Z & LinuxONE)
           
           ## Registry Support
           
