@@ -68,6 +68,9 @@ jobs:
         platform: [ linux/ppc64le, linux/s390x ]
         target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
         version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+        exclude:
+          - platform: linux/s390x
+            target: argocli
     permissions:
       contents: read
       packages: write
@@ -201,6 +204,9 @@ jobs:
         platform: [ linux/amd64, linux/arm64, linux/ppc64le, linux/s390x ]
         target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
         version: ${{ fromJson(needs.check-releases.outputs.versions) }}
+        exclude:
+          - platform: linux/s390x
+            target: argocli
     permissions:
       contents: read
       packages: write
@@ -393,11 +399,19 @@ jobs:
                 ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
-              docker manifest create $image_name \
-                ${image_name}-linux-arm64 \
-                ${image_name}-linux-amd64 \
-                ${image_name}-linux-ppc64le \
-                ${image_name}-linux-s390x
+              if [ "$target" = "argocli" ]; then
+                # argocli excludes s390x
+                docker manifest create $image_name \
+                  ${image_name}-linux-arm64 \
+                  ${image_name}-linux-amd64 \
+                  ${image_name}-linux-ppc64le
+              else
+                docker manifest create $image_name \
+                  ${image_name}-linux-arm64 \
+                  ${image_name}-linux-amd64 \
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
+              fi
             fi
 
             docker manifest push $image_name
@@ -427,11 +441,19 @@ jobs:
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
 
-              docker manifest create $latest_name \
-                ${image_name}-linux-arm64 \
-                ${image_name}-linux-amd64 \
-                ${image_name}-linux-ppc64le \
-                ${image_name}-linux-s390x
+              if [ "$target" = "argocli" ]; then
+                # argocli excludes s390x
+                docker manifest create $latest_name \
+                  ${image_name}-linux-arm64 \
+                  ${image_name}-linux-amd64 \
+                  ${image_name}-linux-ppc64le
+              else
+                docker manifest create $latest_name \
+                  ${image_name}-linux-arm64 \
+                  ${image_name}-linux-amd64 \
+                  ${image_name}-linux-ppc64le \
+                  ${image_name}-linux-s390x
+              fi
             fi
 
             docker manifest push $latest_name
@@ -680,7 +702,7 @@ jobs:
           1. Checks for new releases from `argoproj/argo-workflows`
           2. Clones the source code for each new version  
           3. Builds all components (controller, executor, cli) with `GOEXPERIMENT=boringcrypto`
-          4. Creates multi-architecture manifests for linux/amd64, linux/arm64, linux/ppc64le, and linux/s390x
+          4. Creates multi-architecture manifests for linux/amd64, linux/arm64, linux/ppc64le, and linux/s390x (except argocli which excludes s390x)
           5. Pushes to the configured container registry
 
           ## New Architecture
@@ -728,7 +750,7 @@ jobs:
           - Uses the same build targets: `workflow-controller`, `argocli`, `argoexec`, `argoexec-nonroot`
           - Follows the same multi-stage build process
           - Only adds the `GOEXPERIMENT=boringcrypto` build argument
-          - Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x)
+          - Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x) - argocli excludes s390x
           
           ## Supported Architectures
 
@@ -737,7 +759,7 @@ jobs:
           - linux/amd64
           - linux/arm64
           - linux/ppc64le (PowerPC 64-bit Little Endian)
-          - linux/s390x (IBM Z & LinuxONE)
+          - linux/s390x (IBM Z & LinuxONE) - **Note: argocli is not available for s390x**
           
           ## Registry Support
           
