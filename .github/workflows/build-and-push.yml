@@ -106,9 +106,9 @@ jobs:
           cd argo-workflows
           # Find and replace node:<version>-alpine with node:<version>-slim
           sed -i 's/FROM node:\([0-9]\+\)-alpine/FROM node:\1-slim/' Dockerfile
-          # Find node line number and remove apk in next 3 lines
+          # Find node line number and replace apk with apt in next 3 lines
           LINE=$(grep -n "FROM node:[0-9]\+-slim" Dockerfile | cut -d: -f1)
-          sed -i "$((LINE+1)),$((LINE+3)){ /RUN apk.*git/d; }" Dockerfile
+          sed -i "$((LINE+1)),$((LINE+3)){ s/RUN apk update && apk add --no-cache git/RUN apt install -y git/; }" Dockerfile
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -250,9 +250,9 @@ jobs:
           cd argo-workflows
           # Find and replace node:<version>-alpine with node:<version>-slim
           sed -i 's/FROM node:\([0-9]\+\)-alpine/FROM node:\1-slim/' Dockerfile
-          # Find node line number and remove apk in next 3 lines
+          # Find node line number and replace apk with apt in next 3 lines
           LINE=$(grep -n "FROM node:[0-9]\+-slim" Dockerfile | cut -d: -f1)
-          sed -i "$((LINE+1)),$((LINE+3)){ /RUN apk.*git/d; }" Dockerfile
+          sed -i "$((LINE+1)),$((LINE+3)){ s/RUN apk update && apk add --no-cache git/RUN apt install -y git/; }" Dockerfile
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
