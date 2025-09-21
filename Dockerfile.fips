@@ -3,26 +3,24 @@ ARG GIT_COMMIT=unknown
 ARG GIT_TAG=unknown
 ARG GIT_TREE_STATE=unknown
 
-FROM registry.access.redhat.com/ubi9/go-toolset:1.24 AS builder
+FROM golang:1.24.4-alpine3.22 as builder
 
-# Install dependencies
-RUN microdnf update -y && microdnf install -y \
+# libc-dev to build openapi-gen
+RUN apk update && apk add --no-cache \
     git \
     make \
     ca-certificates \
     wget \
     curl \
     gcc \
-    glibc-devel \
-    tar \
-    gzip \
-    which \
-    && microdnf clean all
+    libc-dev \
+    bash \
+    mailcap
 
 WORKDIR /go/src/github.com/argoproj/argo-workflows
 COPY go.mod .
 COPY go.sum .
-RUN --mount=type=cache,target=/go/pkg/mod GOEXPERIMENT=boringcrypto go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
 
@@ -83,7 +81,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 ####################################################################################################
 
 # Define base image as variable for easy maintenance
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6 as argo-base
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6-1758184547 as argo-base
 
 RUN microdnf update -y && microdnf install -y ca-certificates && microdnf clean all
 

@@ -170,10 +170,6 @@ jobs:
             image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}-${tag_suffix}"
           fi
 
-          # Extract GOOS and GOARCH from platform string (linux/ppc64le -> GOOS=linux, GOARCH=ppc64le)
-          GOOS=$(echo "${{ matrix.platform }}" | cut -d'/' -f1)
-          GOARCH=$(echo "${{ matrix.platform }}" | cut -d'/' -f2)
-
           docker buildx build \
             --cache-from "type=local,src=/tmp/.buildx-cache" \
             --cache-to "type=local,dest=/tmp/.buildx-cache-new,mode=max" \
@@ -181,9 +177,6 @@ jobs:
             --build-arg GIT_COMMIT=$GIT_COMMIT \
             --build-arg GIT_TAG=$GIT_TAG \
             --build-arg GIT_TREE_STATE=$GIT_TREE_STATE \
-            --build-arg GOOS=$GOOS \
-            --build-arg GOARCH=$GOARCH \
-            --build-arg CGO_ENABLED=0 \
             --platform="${{ matrix.platform }}" \
             --target ${{ matrix.target }} \
             --provenance=false \
@@ -314,9 +307,6 @@ jobs:
             image_name="${{ env.IMAGE_NAMESPACE }}/${{ matrix.target }}:${tag}-${tag_suffix}"
           fi
 
-          # Extract GOOS and GOARCH from platform string (linux/ppc64le -> GOOS=linux, GOARCH=ppc64le)
-          GOOS=$(echo "${{ matrix.platform }}" | cut -d'/' -f1)
-          GOARCH=$(echo "${{ matrix.platform }}" | cut -d'/' -f2)
 
           docker buildx build \
             --cache-from "type=local,src=/tmp/.buildx-cache-fips" \
@@ -325,9 +315,6 @@ jobs:
             --build-arg GIT_COMMIT=$GIT_COMMIT \
             --build-arg GIT_TAG=$GIT_TAG \
             --build-arg GIT_TREE_STATE=$GIT_TREE_STATE \
-            --build-arg GOOS=$GOOS \
-            --build-arg GOARCH=$GOARCH \
-            --build-arg CGO_ENABLED=0 \
             --platform="${{ matrix.platform }}" \
             --target ${{ matrix.target }} \
             --provenance=false \
