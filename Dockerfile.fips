@@ -83,7 +83,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 ####################################################################################################
 
 # Define base image as variable for easy maintenance
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.4-1502 as argo-base
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6 as argo-base
 
 RUN microdnf update -y && microdnf install -y ca-certificates && microdnf clean all
 
