@@ -128,7 +128,7 @@ The images are built using the exact same process as upstream Argo Workflows:
 - Uses the same build targets: `workflow-controller`, `argocli`, `argoexec`, `argoexec-nonroot`
 - Follows the same multi-stage build process
 - Only adds the `GOEXPERIMENT=boringcrypto` build argument
-- Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x) - argocli excludes s390x
+- Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x)
 
 ## Supported Architectures
 
@@ -137,7 +137,7 @@ All images are built with BoringCrypto FIPS support for:
 - linux/amd64
 - linux/arm64
 - linux/ppc64le (PowerPC 64-bit Little Endian)
-- linux/s390x (IBM Z & LinuxONE) - **Note: argocli is not available for s390x**
+- linux/s390x (IBM Z & LinuxONE)
 
 ## Registry Support
 
