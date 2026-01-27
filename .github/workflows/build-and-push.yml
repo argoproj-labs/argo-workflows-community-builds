@@ -201,7 +201,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform: [ linux/amd64, linux/arm64, linux/ppc64le, linux/s390x ]
+        platform: [ linux/amd64, linux/arm64]
         target: [ workflow-controller, argocli, argoexec, argoexec-nonroot ]
         version: ${{ fromJson(needs.check-releases.outputs.versions) }}
     permissions:
