@@ -504,23 +504,17 @@ jobs:
               image_name="${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot"
               docker manifest create $image_name \
                 ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-ppc64le \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               if [ "$target" = "argocli" ]; then
                 docker manifest create $image_name \
                   ${image_name}-linux-arm64 \
-                  ${image_name}-linux-amd64 \
-                  ${image_name}-linux-ppc64le \
-                  ${image_name}-linux-s390x
+                  ${image_name}-linux-amd64
               else
                 docker manifest create $image_name \
                   ${image_name}-linux-arm64 \
-                  ${image_name}-linux-amd64 \
-                  ${image_name}-linux-ppc64le \
-                  ${image_name}-linux-s390x
+                  ${image_name}-linux-amd64
               fi
             fi
 
@@ -544,9 +538,7 @@ jobs:
 
               docker manifest create $latest_name \
                 ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-ppc64le \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-s390x
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64\
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
@@ -554,15 +546,11 @@ jobs:
               if [ "$target" = "argocli" ]; then
                 docker manifest create $latest_name \
                   ${image_name}-linux-arm64 \
-                  ${image_name}-linux-amd64 \
-                  ${image_name}-linux-ppc64le \
-                  ${image_name}-linux-s390x
+                  ${image_name}-linux-amd64
               else
                 docker manifest create $latest_name \
                   ${image_name}-linux-arm64 \
-                  ${image_name}-linux-amd64 \
-                  ${image_name}-linux-ppc64le \
-                  ${image_name}-linux-s390x
+                  ${image_name}-linux-amd64
               fi
             fi
 
@@ -691,215 +679,3 @@ jobs:
               docker run --rm "$image_name" version || echo "Version command test completed"
               ;;
           esac
-
-  update-readme:
-    needs: [check-releases, push-fips-manifests, test-docker-images]
-    runs-on: ubuntu-latest
-    if: always() && needs.push-fips-manifests.result == 'success'
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set registry variables
-        run: |
-          if [ "${{ github.event.inputs.registry }}" != "" ]; then
-            echo "REGISTRY=${{ github.event.inputs.registry }}" >> $GITHUB_ENV
-          else
-            echo "REGISTRY=ghcr.io" >> $GITHUB_ENV
-          fi
-          
-          # Set image namespace and login credentials based on registry
-          if [ "${{ env.REGISTRY || 'ghcr.io' }}" = "ghcr.io" ]; then
-            echo "IMAGE_NAMESPACE=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
-            echo "DOCKER_USERNAME=${{ secrets.GHCR_USERNAME || github.actor }}" >> $GITHUB_ENV
-            echo "DOCKER_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
-          elif [ "${{ env.REGISTRY || 'ghcr.io' }}" = "quay.io" ]; then
-            echo "IMAGE_NAMESPACE=quay.io/${{ github.repository }}" >> $GITHUB_ENV
-            echo "DOCKER_USERNAME=${{ secrets.QUAYIO_USERNAME }}" >> $GITHUB_ENV
-            echo "DOCKER_PASSWORD=${{ secrets.QUAYIO_PASSWORD }}" >> $GITHUB_ENV
-          else
-            echo "IMAGE_NAMESPACE=${{ github.repository }}" >> $GITHUB_ENV
-            echo "DOCKER_USERNAME=${{ secrets.DOCKERIO_USERNAME }}" >> $GITHUB_ENV
-            echo "DOCKER_PASSWORD=${{ secrets.DOCKERIO_PASSWORD }}" >> $GITHUB_ENV
-          fi
-
-      - name: Update README with latest builds
-        run: |
-          cat > README.md << 'EOF'
-          # Argo Workflows Community Builds
-          
-          This repository provides unofficial builds of Argo Workflows containers with BoringCrypto support for FIPS 140-2 compliance.
-          
-          ## Available Images
-          
-          All images are built with `GOEXPERIMENT=boringcrypto` using the official Argo Workflows Dockerfile and build process.
-          
-          ### Latest Images (BoringCrypto)
-          
-          ```bash
-          # Workflow Controller
-          ${{ env.IMAGE_NAMESPACE }}/workflow-controller:latest-fips
-          
-          # Argo CLI  
-          ${{ env.IMAGE_NAMESPACE }}/argocli:latest-fips
-          
-          # Executor
-          ${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips
-          
-          # Executor (non-root)
-          ${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips-nonroot
-          ```
-          
-          ### Versioned Images
-          
-          Specific versions follow the upstream pattern with `-fips` suffix:
-          
-          ```bash
-          # Example for v3.7.2
-          ${{ env.IMAGE_NAMESPACE }}/workflow-controller:v3.7.2-fips
-          ${{ env.IMAGE_NAMESPACE }}/argocli:v3.7.2-fips  
-          ${{ env.IMAGE_NAMESPACE }}/argoexec:v3.7.2-fips
-          ${{ env.IMAGE_NAMESPACE }}/argoexec:v3.7.2-fips-nonroot
-          ```
-          
-          ## Usage
-          
-          Replace the standard Argo Workflows images in your deployment:
-          
-          ### Workflow Controller Deployment
-          
-          ```yaml
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: workflow-controller
-          spec:
-            template:
-              spec:
-                containers:
-                - name: workflow-controller
-                  image: ${{ env.IMAGE_NAMESPACE }}/workflow-controller:latest-fips
-          ```
-          
-          ### Workflow Controller ConfigMap
-          
-          ```yaml
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: workflow-controller-configmap
-          data:
-            config: |
-              executor:
-                image: ${{ env.IMAGE_NAMESPACE }}/argoexec:latest-fips
-          ```
-          
-          ### Argo CLI
-          
-          ```bash
-          # Pull and use the BoringCrypto CLI
-          docker run --rm -it ${{ env.IMAGE_NAMESPACE }}/argocli:latest-fips version
-          ```
-          
-          ## Automatic Updates
-          
-          Images are automatically built daily to track the latest Argo Workflows releases. The workflow:
-          
-          1. Checks for new releases from `argoproj/argo-workflows`
-          2. Clones the source code for each new version  
-          3. Builds all components (controller, executor, cli) with `GOEXPERIMENT=boringcrypto`
-          4. Creates multi-architecture manifests for linux/amd64, linux/arm64, linux/ppc64le, and linux/s390x (except argocli which excludes s390x)
-          5. Pushes to the configured container registry
-
-          ## New Architecture
-
-          This project introduces an enhanced build architecture for Argo Workflows with several key improvements:
-
-          ### Multi-Architecture Support
-          - **Native ARM64 Support**: Full support for linux/arm64 alongside linux/amd64
-          - **Cross-Platform Builds**: Unified manifests enable seamless deployment across architectures
-          - **Performance Optimized**: Architecture-specific optimizations for both Intel and ARM processors
-
-          ### Enhanced Security Framework
-          - **BoringCrypto Integration**: FIPS 140-2 validated cryptographic operations
-          - **Secure Build Pipeline**: Hardened GitHub Actions workflow with security scanning
-          - **Supply Chain Security**: Reproducible builds with attestation and SBOM generation
-
-          ### Automated Release Management
-          - **Intelligent Version Tracking**: Automated detection and building of new upstream releases
-          - **Multi-Registry Distribution**: Flexible deployment to GitHub Container Registry, Quay.io, and Docker Hub
-          - **Rolling Update Strategy**: Builds only the latest 2 releases to maintain freshness while ensuring stability
-
-          ### Container Optimization
-          - **Minimal Attack Surface**: Non-root executor variants for enhanced security posture
-          - **Layered Security**: Multi-stage builds optimized for size and security
-          - **Compliance Ready**: Pre-configured for regulated environments requiring FIPS compliance
-
-          This architecture provides a robust foundation for enterprise deployments while maintaining compatibility with standard Argo Workflows installations.
-
-          ## BoringCrypto & FIPS Compliance
-          
-          These builds include BoringCrypto, Google's FIPS 140-2 validated cryptographic module. Key benefits:
-          
-          - **FIPS 140-2 Compliance**: Suitable for government and regulated environments
-          - **Validated Cryptography**: Uses BoringSSL instead of Go's standard crypto packages  
-          - **Same Functionality**: Drop-in replacement for standard Argo Workflows images
-          - **Regular Updates**: Automatically tracks upstream releases
-          
-          The `GOEXPERIMENT=boringcrypto` build flag ensures all cryptographic operations use the FIPS-validated BoringSSL library.
-          
-          ## Build Process
-          
-          The images are built using the exact same process as upstream Argo Workflows:
-          
-          - Uses the official Dockerfile from `argoproj/argo-workflows`
-          - Uses the same build targets: `workflow-controller`, `argocli`, `argoexec`, `argoexec-nonroot`
-          - Follows the same multi-stage build process
-          - Only adds the `GOEXPERIMENT=boringcrypto` build argument
-          - Creates multi-architecture manifests (linux/amd64, linux/arm64, linux/ppc64le, linux/s390x)
-          
-          ## Supported Architectures
-
-          All images are built with BoringCrypto FIPS support for:
-
-          - linux/amd64
-          - linux/arm64
-          - linux/ppc64le (PowerPC 64-bit Little Endian)
-          - linux/s390x (IBM Z & LinuxONE)
-          
-          ## Registry Support
-          
-          Images can be pushed to multiple registries:
-          - GitHub Container Registry (ghcr.io) - default
-          - Quay.io (quay.io)  
-          - Docker Hub (docker.io)
-          
-          ## Manual Builds
-          
-          You can trigger manual builds using GitHub Actions workflow dispatch:
-          
-          1. Go to the Actions tab
-          2. Select "Build and Push Argo Workflows (BoringCrypto)"
-          3. Click "Run workflow"
-          4. Optionally specify a specific version and registry
-          
-          ## License
-          
-          This project follows the same Apache 2.0 license as Argo Workflows.
-          EOF
-
-      - name: Commit README updates
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add README.md
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update README with build information [skip ci]"
-            git push
-          fi
