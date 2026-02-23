@@ -538,7 +538,7 @@ jobs:
 
               docker manifest create $latest_name \
                 ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-arm64 \
-                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64\
+                ${{ env.IMAGE_NAMESPACE }}/argoexec:${tag}-nonroot-linux-amd64
             else
               image_name="${{ env.IMAGE_NAMESPACE }}/${target}:${tag}"
               latest_name="${{ env.IMAGE_NAMESPACE }}/${target}:latest-fips"
