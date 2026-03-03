@@ -242,6 +242,14 @@ jobs:
       - name: Replace Dockerfile with FIPS version
         run: |
           cd argo-workflows
+          # Extract the golang base image used by upstream so the FIPS build tracks the same version
+          GOLANG_IMAGE=$(grep -m1 '^FROM[[:space:]]\+golang:' Dockerfile | awk '{print $2}')
+          if [ -z "$GOLANG_IMAGE" ]; then
+            echo "⚠️ WARNING: Could not extract golang image from upstream Dockerfile; falling back to default in Dockerfile.fips"
+          else
+            echo "✅ Using upstream golang image: $GOLANG_IMAGE"
+          fi
+          echo "GOLANG_IMAGE=${GOLANG_IMAGE}" >> $GITHUB_ENV
           cp ../Dockerfile.fips Dockerfile
 
       - name: Modify Dockerfile for s390x argocli
@@ -322,6 +330,12 @@ jobs:
           fi
 
 
+          # Build GOLANG_IMAGE build arg only when successfully extracted from upstream
+          GOLANG_IMAGE_ARG=""
+          if [ -n "${{ env.GOLANG_IMAGE }}" ]; then
+            GOLANG_IMAGE_ARG="--build-arg GOLANG_IMAGE=${{ env.GOLANG_IMAGE }}"
+          fi
+
           docker buildx build \
             --cache-from "type=local,src=/tmp/.buildx-cache-fips" \
             --cache-to "type=local,dest=/tmp/.buildx-cache-fips-new,mode=max" \
@@ -329,6 +343,7 @@ jobs:
             --build-arg GIT_COMMIT=$GIT_COMMIT \
             --build-arg GIT_TAG=$GIT_TAG \
             --build-arg GIT_TREE_STATE=$GIT_TREE_STATE \
+            $GOLANG_IMAGE_ARG \
             --platform="${{ matrix.platform }}" \
             --target ${{ matrix.target }} \
             --provenance=false \
