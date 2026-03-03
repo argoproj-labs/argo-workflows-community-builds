@@ -239,6 +239,28 @@ jobs:
           git clone --depth 1 --branch ${{ matrix.version }} https://github.com/argoproj/argo-workflows.git
           cd argo-workflows
 
+      - name: Detect Go version from upstream Dockerfile
+        id: go-version
+        run: |
+          cd argo-workflows
+          # Extract Go version from upstream Dockerfile
+          GO_IMAGE=$(grep -E '^ARG GOLANG_IMAGE=' Dockerfile | head -1 | cut -d= -f2)
+
+          if [ -z "$GO_IMAGE" ]; then
+            # Fallback: try to extract from FROM golang line
+            GO_IMAGE=$(grep -E '^FROM golang:' Dockerfile | head -1 | awk '{print $2}' | sed 's/FROM //' | sed 's/ as.*//')
+          fi
+
+          if [ -z "$GO_IMAGE" ]; then
+            # Default fallback
+            GO_IMAGE="golang:1.25.6-alpine3.23"
+            echo "⚠️ Could not detect Go version from Dockerfile, using default: $GO_IMAGE"
+          else
+            echo "✅ Detected Go version from upstream: $GO_IMAGE"
+          fi
+
+          echo "golang_image=$GO_IMAGE" >> $GITHUB_OUTPUT
+
       - name: Replace Dockerfile with FIPS version
         run: |
           cd argo-workflows
@@ -326,6 +348,7 @@ jobs:
             --cache-from "type=local,src=/tmp/.buildx-cache-fips" \
             --cache-to "type=local,dest=/tmp/.buildx-cache-fips-new,mode=max" \
             --output "type=image,push=true" \
+            --build-arg GOLANG_IMAGE=${{ steps.go-version.outputs.golang_image }} \
             --build-arg GIT_COMMIT=$GIT_COMMIT \
             --build-arg GIT_TAG=$GIT_TAG \
             --build-arg GIT_TREE_STATE=$GIT_TREE_STATE \
